@@ -183,6 +183,8 @@ app.get('/candidates/:pollingCenterId', async (req, res) => {
 });
 
 // ---------------- SUBMIT RESULTS ----------------
+// ---------------- SUBMIT RESULTS ----------------
+// ---------------- SUBMIT RESULTS ----------------
 app.post('/submit-results',
     upload.any(),
     body('monitorId').notEmpty().trim().escape(),
@@ -208,37 +210,30 @@ app.post('/submit-results',
             connection = await pool.getConnection();
             await connection.beginTransaction();
 
-            // Check session
-            let [sessionRows] = await connection.execute(
-                `SELECT s.session_id, MAX(er.is_verified) AS is_verified
-                 FROM submission_sessions s
-                 LEFT JOIN election_results er ON s.session_id = er.session_id
-                 WHERE s.monitor_id = ? AND s.polling_center_id = ?
-                 GROUP BY s.session_id`,
+            // Find or create submission session
+            const [sessionRows] = await connection.execute(
+                'SELECT session_id FROM submission_sessions WHERE monitor_id = ? AND polling_center_id = ?',
                 [monitorId, pollingCenterId]
             );
 
             let sessionId;
             if (sessionRows.length > 0) {
-                if (sessionRows[0].is_verified == 1) {
-                    throw new Error('Submission is verified and cannot be updated.');
-                }
                 sessionId = sessionRows[0].session_id;
-
-                await connection.execute(
-                    'DELETE FROM votes WHERE result_id IN (SELECT result_id FROM election_results WHERE session_id = ? AND election_type = ?)',
-                    [sessionId, electionType]
-                );
-                await connection.execute(
-                    'DELETE FROM election_results WHERE session_id = ? AND election_type = ?',
-                    [sessionId, electionType]
-                );
             } else {
                 const [sessionResult] = await connection.execute(
                     'INSERT INTO submission_sessions (monitor_id, polling_center_id, submission_time) VALUES (?, ?, NOW())',
                     [monitorId, pollingCenterId]
                 );
                 sessionId = sessionResult.insertId;
+            }
+
+            // Check if this election type has already been submitted
+            const [existingResult] = await connection.execute(
+                'SELECT result_id FROM election_results WHERE session_id = ? AND election_type = ?',
+                [sessionId, electionType]
+            );
+            if (existingResult.length > 0) {
+                throw new Error(`Results for ${electionType} have already been submitted and cannot be changed.`);
             }
 
             // Insert election result
@@ -248,14 +243,29 @@ app.post('/submit-results',
                  VALUES (?, ?, ?, ?, ?, ?, (SELECT registered_voters FROM polling_centers WHERE polling_center_id = ?))`,
                 [sessionId, electionType, imageFile.buffer.toString('base64'), totalVotesCast, invalidVotes, unusedBallots, pollingCenterId]
             );
+
             const resultId = result.insertId;
 
-            // Insert votes with original_votes_count
+            // Insert votes
             const voteEntries = Object.keys(votesJson).map(key => [resultId, key, votesJson[key], votesJson[key]]);
             if (voteEntries.length > 0) {
                 await connection.query(
                     'INSERT INTO votes (result_id, candidate_id, votes_count, original_votes_count) VALUES ?',
                     [voteEntries]
+                );
+            }
+
+            // Check if monitor has submitted all three election types
+            const [submittedResults] = await connection.execute(
+                'SELECT COUNT(DISTINCT election_type) AS total_submitted FROM election_results WHERE session_id = ?',
+                [sessionId]
+            );
+
+            if (submittedResults[0].total_submitted >= 3) {
+                // Lock monitor by changing password
+                await connection.execute(
+                    "UPDATE users u JOIN monitors m ON u.user_id = m.user_id SET u.password = 'GGG' WHERE m.monitor_id = ?",
+                    [monitorId]
                 );
             }
 
@@ -271,6 +281,7 @@ app.post('/submit-results',
         }
     }
 );
+
 
 // ---------------- SUBMISSION HISTORY ----------------
 app.get('/submissions/:monitorId', async (req, res) => {
@@ -313,8 +324,8 @@ app.get('/submissions/:monitorId', async (req, res) => {
 /*
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
-});*/
-
+});
+*/
 // Start HTTPS server
 
 https.createServer(options, app)
