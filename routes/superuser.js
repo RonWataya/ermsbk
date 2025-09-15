@@ -1,6 +1,6 @@
 const express = require("express");
 const session = require("express-session");
-const db = require("../config/db.js"); // Import database connection from db.js
+
 require('dotenv').config(); 
 const router = express.Router();
 
