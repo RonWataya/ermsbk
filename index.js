@@ -3,7 +3,7 @@ const cors = require("cors");
 require('dotenv').config();
 const https = require('https');
 const fs = require('fs');
-//const PORT = 8000;
+const PORT = 8000;
 
 const auditor = require('./routes/auditor');
 const monitor = require('./routes/monitor');
@@ -29,7 +29,7 @@ app.use(auditor);
 
 
 // HTTPS Options - Replace with OmniPOS cert path
-
+/*
 const options = {
     key: fs.readFileSync('/etc/letsencrypt/live/miwalletmw.com/privkey.pem'),
     cert: fs.readFileSync('/etc/letsencrypt/live/miwalletmw.com/fullchain.pem'),
@@ -43,9 +43,9 @@ https.createServer(options, app)
     })
     .on('error', (error) => {
         console.error('HTTPS server error:', error);
-    });
+    });*/
 
-//app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 // Graceful error handlers
 process.on('uncaughtException', (error) => {
     console.error('Uncaught exception:', error);

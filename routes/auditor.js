@@ -12,21 +12,27 @@ const pool = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 50
 });
-/*const pool = mysql.createPool({
-    host: 'tests.cnm0ouk4axh4.us-east-1.rds.amazonaws.com',
-    user: 'admin',
-    password: 'wataya1993',
-    database: 'elections_management',
-    waitForConnections: true,
-    connectionLimit: 50
-});*/
 
 // --- API Endpoints for Filters ---
 
 // Get all districts
 router.get('/api/districts', async (req, res) => {
     try {
-        const [rows] = await pool.query(`SELECT district_id, district_name FROM districts ORDER BY district_name`);
+        const { districtIds } = req.query;
+        let sql = `SELECT district_id, district_name FROM districts`;
+        const params = [];
+        
+        if (districtIds) {
+            const ids = districtIds.split(',').map(Number);
+            if (ids.length > 0) {
+                sql += ` WHERE district_id IN (?)`;
+                params.push(ids);
+            }
+        }
+        
+        sql += ` ORDER BY district_name`;
+        
+        const [rows] = await pool.query(sql, params);
         res.json(rows);
     } catch (err) {
         console.error(err);
@@ -94,31 +100,41 @@ router.get('/api/polling_centers', async (req, res) => {
 // --- Get filtered submissions with status ---
 router.get('/api/submissions', async (req, res) => {
     try {
-        const { districtId, constituencyId, wardId, pollingCenterId, status } = req.query;
+        const { districtId, constituencyId, wardId, pollingCenterId, status, allowedDistricts } = req.query;
         let sql = `
-    SELECT 
-        ss.session_id, 
-        pc.polling_center_name, 
-        CONCAT(u.first_name, ' ', u.last_name) AS monitor_name, 
-        d.district_name,
-        c.constituency_name,
-        ss.submission_time,
-        (SELECT COUNT(*) FROM election_results er WHERE er.session_id = ss.session_id AND er.is_verified = 1) AS verified_count,
-        (SELECT COUNT(*) FROM election_results er WHERE er.session_id = ss.session_id AND er.is_verified = 0) AS unverified_count,
-        (SELECT COUNT(*) FROM election_results er WHERE er.session_id = ss.session_id AND er.is_verified = 2) AS rejected_count,
-        (SELECT COUNT(*) FROM election_results er WHERE er.session_id = ss.session_id) AS total_elections
-    FROM submission_sessions ss
-    JOIN monitors m ON ss.monitor_id = m.monitor_id
-    JOIN users u ON m.user_id = u.user_id
-    JOIN polling_centers pc ON ss.polling_center_id = pc.polling_center_id
-    JOIN wards w ON pc.ward_id = w.ward_id
-    JOIN constituencies c ON w.constituency_id = c.constituency_id
-    JOIN districts d ON c.district_id = d.district_id
-    WHERE 1=1
-`;
-
+            SELECT 
+                ss.session_id, 
+                pc.polling_center_name, 
+                CONCAT(u.first_name, ' ', u.last_name) AS monitor_name, 
+                d.district_name,
+                c.constituency_name,
+                ss.submission_time,
+                (SELECT COUNT(*) FROM election_results er WHERE er.session_id = ss.session_id AND er.is_verified = 1) AS verified_count,
+                (SELECT COUNT(*) FROM election_results er WHERE er.session_id = ss.session_id AND er.is_verified = 0) AS unverified_count,
+                (SELECT COUNT(*) FROM election_results er WHERE er.session_id = ss.session_id AND er.is_verified = 2) AS rejected_count,
+                (SELECT COUNT(*) FROM election_results er WHERE er.session_id = ss.session_id) AS total_elections
+            FROM submission_sessions ss
+            JOIN monitors m ON ss.monitor_id = m.monitor_id
+            JOIN users u ON m.user_id = u.user_id
+            JOIN polling_centers pc ON ss.polling_center_id = pc.polling_center_id
+            JOIN wards w ON pc.ward_id = w.ward_id
+            JOIN constituencies c ON w.constituency_id = c.constituency_id
+            JOIN districts d ON c.district_id = d.district_id
+            WHERE 1=1
+        `;
 
         const params = [];
+        
+        // Add condition for the auditor's allowed districts
+        if (allowedDistricts) {
+            const ids = allowedDistricts.split(',').map(Number);
+            if (ids.length > 0) {
+                sql += ` AND d.district_id IN (?)`;
+                params.push(ids);
+            }
+        }
+        
+        // Add other filters
         if (districtId) { sql += ` AND d.district_id = ?`; params.push(districtId); }
         if (constituencyId) { sql += ` AND c.constituency_id = ?`; params.push(constituencyId); }
         if (wardId) { sql += ` AND w.ward_id = ?`; params.push(wardId); }
@@ -132,7 +148,7 @@ router.get('/api/submissions', async (req, res) => {
             if (status === 'unverified') return row.unverified_count > 0 && row.verified_count === 0 && row.rejected_count === 0;
             if (status === 'verified') return row.verified_count === row.total_elections;
             if (status === 'rejected') return row.rejected_count > 0;
-            return true; // All Statuses
+            return true;
         });
 
         res.json(filteredRows);
@@ -186,7 +202,6 @@ router.post('/api/results/verify', async (req, res) => {
             await connection.query(`UPDATE votes SET votes_count=? WHERE result_id=? AND candidate_id=?`, [v.votes_count, result_id, v.candidate_id]);
         }
         
-        // Check if all elections for this session are verified
         const [resultRow] = await connection.query(`SELECT session_id FROM election_results WHERE result_id = ?`, [result_id]);
         const sessionId = resultRow[0].session_id;
 
@@ -194,12 +209,12 @@ router.post('/api/results/verify', async (req, res) => {
         if (unverifiedResults[0].count === 0) {
             const [rejectedResults] = await connection.query(`SELECT COUNT(*) as count FROM election_results WHERE session_id = ? AND is_verified = 2`, [sessionId]);
             if (rejectedResults[0].count === 0) {
-                 await connection.query(`
-                     UPDATE monitors m
-                     JOIN submission_sessions ss ON m.monitor_id = ss.monitor_id
-                     SET m.payment_status = 'eligible'
-                     WHERE ss.session_id = ?
-                 `, [sessionId]);
+                await connection.query(`
+                    UPDATE monitors m
+                    JOIN submission_sessions ss ON m.monitor_id = ss.monitor_id
+                    SET m.payment_status = 'eligible'
+                    WHERE ss.session_id = ?
+                `, [sessionId]);
             }
         }
         
@@ -216,104 +231,38 @@ router.post('/api/results/verify', async (req, res) => {
 
 // --- Reject election result ---
 router.post('/api/results/reject', async (req, res) => {
+    const connection = await pool.getConnection();
     try {
+        await connection.beginTransaction();
         const { result_id } = req.body;
-        await pool.query(`UPDATE election_results SET is_verified=2 WHERE result_id=?`, [result_id]);
+        
+        await connection.query(`UPDATE election_results SET is_verified=2 WHERE result_id=?`, [result_id]);
+
+        const [resultRow] = await connection.query(`SELECT session_id FROM election_results WHERE result_id = ?`, [result_id]);
+        const sessionId = resultRow[0].session_id;
+
+        const [unverifiedResults] = await connection.query(`SELECT COUNT(*) as count FROM election_results WHERE session_id = ? AND is_verified = 0`, [sessionId]);
+        if (unverifiedResults[0].count === 0) {
+            const [rejectedResults] = await connection.query(`SELECT COUNT(*) as count FROM election_results WHERE session_id = ? AND is_verified = 2`, [sessionId]);
+            if (rejectedResults[0].count > 0) {
+                // Set payment status to 'ineligible' if any election in the session is rejected
+                await connection.query(`
+                    UPDATE monitors m
+                    JOIN submission_sessions ss ON m.monitor_id = ss.monitor_id
+                    SET m.payment_status = 'ineligible'
+                    WHERE ss.session_id = ?
+                `, [sessionId]);
+            }
+        }
+
+        await connection.commit();
         res.json({ message: 'Election rejected successfully' });
     } catch (err) {
+        await connection.rollback();
         console.error(err);
         res.status(500).json({ message: 'Error rejecting result' });
-    }
-});
-
-// --- Get filtered election results ---
-router.get('/api/results', async (req, res) => {
-    const { district_id, constituency_id, ward_id, election_type } = req.query;
-
-    let query = `
-        SELECT
-            c.candidate_name,
-            c.party,
-            SUM(v.votes_count) as total_votes
-        FROM
-            votes v
-        JOIN
-            election_results er ON v.result_id = er.result_id
-        JOIN
-            submission_sessions ss ON er.session_id = ss.session_id
-        JOIN
-            polling_centers pc ON ss.polling_center_id = pc.polling_center_id
-        JOIN
-            wards w ON pc.ward_id = w.ward_id
-        JOIN
-            constituencies co ON w.constituency_id = co.constituency_id
-        JOIN
-            districts d ON co.district_id = d.district_id
-        JOIN
-            candidates c ON v.candidate_id = c.candidate_id
-        WHERE
-            er.is_verified = 1 AND er.election_type = ?
-    `;
-
-    const queryParams = [election_type];
-    
-    if (district_id && district_id !== 'all') {
-        query += ' AND d.district_id = ?';
-        queryParams.push(district_id);
-    }
-
-    if (constituency_id && constituency_id !== 'all') {
-        query += ' AND co.constituency_id = ?';
-        queryParams.push(constituency_id);
-    }
-
-    if (ward_id && ward_id !== 'all') {
-        query += ' AND w.ward_id = ?';
-        queryParams.push(ward_id);
-    }
-
-    query += `
-        GROUP BY
-            c.candidate_name, c.party
-        ORDER BY
-            total_votes DESC
-    `;
-
-    try {
-        const [results] = await pool.query(query, queryParams);
-        res.json(results);
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Error fetching filtered results' });
-    }
-});
-
-// Endpoint for presidential pie chart data
-router.get('/api/presidential-results', async (req, res) => {
-    try {
-        const [results] = await pool.query(`
-            SELECT
-                c.candidate_name,
-                c.party,
-                SUM(v.votes_count) as total_votes
-            FROM
-                votes v
-            JOIN
-                election_results er ON v.result_id = er.result_id
-            JOIN
-                candidates c ON v.candidate_id = c.candidate_id
-            WHERE
-                er.is_verified = 1 
-                AND er.election_type = 'presidential'
-            GROUP BY
-                c.candidate_name, c.party
-            ORDER BY
-                total_votes DESC
-        `);
-        res.json(results);
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Error fetching presidential results' });
+    } finally {
+        connection.release();
     }
 });
 
